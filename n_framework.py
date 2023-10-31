@@ -1,31 +1,24 @@
-#!/usr/bin/env python
-# coding: utf-8
 
-# # Framework
-# > all those functions and classes are imported from mini_batch_training and data_set_hf files as a module
-
-# In[54]:
+# Framework base line functions
+# all those functions and classes are imported from mini_batch_training and data_set_hf files as a module
+# this file is converted from a notebook to python script
 
 
 import pickle,logging,gzip,math,os,time,shutil,torch,matplotlib as mpl,numpy as np,matplotlib.pyplot as plt
 from pathlib import Path
 from torch import tensor,nn,optim
 import torch.nn.functional as F 
-from torch.utils.data import DataLoader, SequentialSampler, RandomSampler, BatchSampler
-
-#from __future__ import annotations
+from torch.utils.data import DataLoader, SequentialSampler, RandomSampler, BatchSampler,default_collate
 import math,numpy as np,matplotlib.pyplot as plt
 from operator import itemgetter
 from itertools import zip_longest
 import fastcore.all as fc
 
-from torch.utils.data import default_collate
-
-from torch.utils.data import DataLoader
 from datasets import load_dataset,load_dataset_builder
-
 import torchvision.transforms.functional as TF
 from fastcore.test import test_close
+
+# defined Functions
 
 def accuracy(out, yb): return (out.argmax(dim=1)==yb).float().mean()
 def report(loss, preds, yb): print(f'{loss:.2f}, {accuracy(preds, yb):.2f}')
@@ -136,7 +129,6 @@ def show_images(ims:list, # Images to show
     axs = get_grid(len(ims), nrows, ncols, **kwargs)[1].flat
     for im,t,ax in zip_longest(ims, titles or [], axs): show_image(im, ax=ax, title=t)
      
-
 class DataLoaders:
     def __init__(self, *dls): self.train,self.valid = dls[:2]
 
@@ -149,7 +141,6 @@ def conv(ni, nf, ks=3, stride=2, act=True):
     if act: res = nn.Sequential(res, nn.ReLU())
     return res
 
-
 def_device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def to_device(x, device=def_device):
@@ -158,10 +149,5 @@ def to_device(x, device=def_device):
     return type(x)(to_device(o, device) for o in x)
 
 def collate_device(b): return to_device(default_collate(b))
-
-
-# In[ ]:
-
-
 
 
