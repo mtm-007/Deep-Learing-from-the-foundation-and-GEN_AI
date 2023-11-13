@@ -10,9 +10,13 @@ from torch import tensor,nn,optim
 import torch.nn.functional as F 
 from torch.utils.data import DataLoader, SequentialSampler, RandomSampler, BatchSampler,default_collate
 import math,numpy as np,matplotlib.pyplot as plt
-from operator import itemgetter
+from operator import attrgetter, itemgetter
 from itertools import zip_longest
 import fastcore.all as fc
+from torcheval.metrics import MulticlassAccuracy,Mean
+from fastprogress import progress_bar,master_bar
+from copy import copy
+     
 
 from datasets import load_dataset,load_dataset_builder
 import torchvision.transforms.functional as TF
@@ -150,4 +154,121 @@ def to_device(x, device=def_device):
 
 def collate_device(b): return to_device(default_collate(b))
 
+class DataLoaders:
+    def __init__(self,*dls): self.train,self.valid = dls[:2]
+    @classmethod
+    def from_dd(cls,dd,batch_size, as_tuple=True):
+        return cls(*[DataLoader(ds, batch_size,num_workers=4, collate_fn=collate_dict(ds)) for ds in dd.values()])
+    
+    #|export
+def identity(*args):
+    #import pdb;pdb.set_trace()
+    if not args:return
+    x,*args = args
+    return (x,)+tuple(args) if args else x
 
+class CancelFitException(Exception): pass
+class CancelBatchException(Exception): pass
+class CancelEpochException(Exception): pass
+
+def run_cbs(cbs,method_nm):
+    for cb in sorted(cbs, key=attrgetter('order')):
+        method = getattr(cb, method_nm, None)
+        if method is not None:method()
+
+class callback(): order=0
+
+class with_cbs:
+    def __init__(self, nm): self.nm = nm
+    def __call__(self, f):
+        def _f(o, *args, **kwargs):
+            try:
+                o.callback(f'before_{self.nm}')
+                f(o, *args, **kwargs)
+                o.callback(f'after_{self.nm}')
+            except globals()[f'Cancel{self.nm.title()}Exception']: pass
+            finally: o.callback(f'cleanup_{self.nm}')
+        return _f
+
+class DeviceCB(callback):
+    def __init__(self, device=def_device): fc.store_attr()
+    def before_fit(self): self.learn.model.to(self.device)
+    def before_batch(self): self.learn.batch = to_device(self.learn.batch,device=self.device)
+
+def to_cpu(x):
+    if isinstance(x, Mapping): return {k:to_cpu(v) for k,v in x.items()}
+    if isinstance(x, list): return [to_cpu(o) for o in x]
+    if isinstance(x, tuple): return tuple(to_cpu(list(x)))
+    res = x.detach().cpu()
+    return res.float() if res.dtype==torch.float16 else res
+     
+class MetricsCB(callback):
+    def __init__(self, *ms, **metrics):
+        for o in ms: metrics[type(o).__name__] = o
+        self.metrics = metrics
+        self.all_metrics = copy(metrics)
+        self.all_metrics['loss'] = self.loss = Mean()
+
+    def _log(self, d): print(d)
+    def before_fit(self, learn): learn.metrics = self
+    def before_epoch(self, learn): [o.reset() for o in self.all_metrics.values()]
+
+    def after_epoch(self, learn):
+        log = {k:f'{v.compute():.3f}' for k,v in self.all_metrics.items()}
+        log['epoch'] = learn.epoch
+        log['train'] = 'train' if learn.model.training else 'eval'
+        self._log(log)
+
+    def after_batch(self, learn):
+        x,y,*_ = to_cpu(learn.batch)
+        for m in self.metrics.values(): m.update(to_cpu(learn.preds), y)
+        self.loss.update(to_cpu(learn.loss), weight=len(x))
+
+class DeviceCB(callback):
+    def __init__(self, device=def_device): fc.store_attr()
+    def before_fit(self, learn):
+        if hasattr(learn.model, 'to'): learn.model.to(self.device)
+    def before_batch(self, learn): learn.batch = to_device(learn.batch, device=self.device)
+     
+
+class SingleBatchCB(callback):
+    order = 1
+    def after_batch(self, learn): raise CancelFitException()
+
+class TrainCB(callback):
+    def __init__(self, n_inp=1): self.n_inp = n_inp
+    def predict(self, learn): learn.preds = learn.model(*learn.batch[:self.n_inp])
+    def get_loss(self, learn): learn.loss = learn.loss_func(learn.preds, *learn.batch[self.n_inp:])
+    def backward(self, learn): learn.loss.backward()
+    def step(self, learn): learn.opt.step()
+    def zero_grad(self, learn): learn.opt.zero_grad()
+     
+class ProgressCB(callback):
+    order = MetricsCB.order+1
+    def __init__(self, plot=False): self.plot = plot
+    def before_fit(self, learn):
+        learn.epochs = self.mbar = master_bar(learn.epochs)
+        self.first = True
+        if hasattr(learn, 'metrics'): learn.metrics._log = self._log
+        self.losses = []
+        self.val_losses = []
+
+    def _log(self, d):
+        if self.first:
+            self.mbar.write(list(d), table=True)
+            self.first = False
+        self.mbar.write(list(d.values()), table=True)
+
+    def before_epoch(self, learn): learn.dl = progress_bar(learn.dl, leave=False, parent=self.mbar)
+    def after_batch(self, learn):
+        learn.dl.comment = f'{learn.loss:.3f}'
+        if self.plot and hasattr(learn, 'metrics') and learn.training:
+            self.losses.append(learn.loss.item())
+            if self.val_losses: self.mbar.update_graph([[fc.L.range(self.losses), self.losses],[fc.L.range(learn.epoch).map(lambda x: (x+1)*len(learn.dls.train)), self.val_losses]])
+    
+    def after_epoch(self, learn): 
+        if not learn.training:
+            if self.plot and hasattr(learn, 'metrics'): 
+                self.val_losses.append(learn.metrics.all_metrics['loss'].compute())
+                self.mbar.update_graph([[fc.L.range(self.losses), self.losses],[fc.L.range(learn.epoch+1).map(lambda x: (x+1)*len(learn.dls.train)), self.val_losses]])
+     
