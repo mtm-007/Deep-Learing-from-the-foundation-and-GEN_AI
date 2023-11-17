@@ -192,10 +192,10 @@ class with_cbs:
             finally: o.callback(f'cleanup_{self.nm}')
         return _f
 
-class DeviceCB(callback):
-    def __init__(self, device=def_device): fc.store_attr()
-    def before_fit(self): self.learn.model.to(self.device)
-    def before_batch(self): self.learn.batch = to_device(self.learn.batch,device=self.device)
+# class DeviceCB(callback):
+#     def __init__(self, device=def_device): fc.store_attr()
+#     def before_fit(self): self.learn.model.to(self.device)
+#     def before_batch(self): self.learn.batch = to_device(self.learn.batch,device=self.device)
 
 def to_cpu(x):
     if isinstance(x, Mapping): return {k:to_cpu(v) for k,v in x.items()}
@@ -226,11 +226,11 @@ class MetricsCB(callback):
         for m in self.metrics.values(): m.update(to_cpu(learn.preds), y)
         self.loss.update(to_cpu(learn.loss), weight=len(x))
 
-class DeviceCB(callback):
-    def __init__(self, device=def_device): fc.store_attr()
-    def before_fit(self, learn):
-        if hasattr(learn.model, 'to'): learn.model.to(self.device)
-    def before_batch(self, learn): learn.batch = to_device(learn.batch, device=self.device)
+# class DeviceCB(callback):
+#     def __init__(self, device=def_device): fc.store_attr()
+#     def before_fit(self, learn):
+#         if hasattr(learn.model, 'to'): learn.model.to(self.device)
+#     def before_batch(self, learn): learn.batch = to_device(learn.batch, device=self.device)
      
 
 class SingleBatchCB(callback):
