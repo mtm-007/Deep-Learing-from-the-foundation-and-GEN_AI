@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, SequentialSampler, RandomSampler, Batch
 import math,numpy as np,matplotlib.pyplot as plt
 from operator import attrgetter, itemgetter
 from itertools import zip_longest
+from contextlib import contextmanager
 import fastcore.all as fc
 from torcheval.metrics import MulticlassAccuracy,Mean
 from fastprogress import progress_bar,master_bar
@@ -160,7 +161,7 @@ class DataLoaders:
     def __init__(self,*dls): self.train,self.valid = dls[:2]
     @classmethod
     def from_dd(cls,dd,batch_size, as_tuple=True):
-        return cls(*[DataLoader(ds, batch_size,num_workers=4, collate_fn=collate_dict(ds)) for ds in dd.values()])
+        return cls(*[DataLoader(ds, batch_size,num_workers=0, collate_fn=collate_dict(ds)) for ds in dd.values()])
     
     #|export
 def identity(*args):
@@ -173,29 +174,30 @@ class CancelFitException(Exception): pass
 class CancelBatchException(Exception): pass
 class CancelEpochException(Exception): pass
 
-def run_cbs(cbs,method_nm,learn=None):
+
+def run_cbs(cbs, method_nm, learn=None):
     for cb in sorted(cbs, key=attrgetter('order')):
         method = getattr(cb, method_nm, None)
-        if method is not None:method(learn)
+        if method is not None: method(learn)
 
 class callback(): order=0
 
 class with_cbs:
-    def __init__(self, nm): self.nm = nm
+    def __init__(self,nm): self.nm = nm
     def __call__(self, f):
-        def _f(o, *args, **kwargs):
+        def _f(o,*args,**kwargs):
             try:
-                o.callback(f'before_{self.nm}')
-                f(o, *args, **kwargs)
-                o.callback(f'after_{self.nm}')
-            except globals()[f'Cancel{self.nm.title()}Exception']: pass
-            finally: o.callback(f'cleanup_{self.nm}')
+                o.callback(f"before_{self.nm}")
+                f(o,*args,**kwargs)
+                o.callback(f"After_{self.nm}")
+            except globals()[f'Cancel{self.nm.title()}Exception']:pass
         return _f
-
-# class DeviceCB(callback):
-#     def __init__(self, device=def_device): fc.store_attr()
-#     def before_fit(self): self.learn.model.to(self.device)
-#     def before_batch(self): self.learn.batch = to_device(self.learn.batch,device=self.device)
+    
+class DeviceCB(callback):
+    def __init__(self, device=def_device): fc.store_attr()
+    def before_fit(self, learn):
+        if hasattr(learn.model, 'to'): learn.model.to(self.device)
+    def before_batch(self, learn): learn.batch = to_device(learn.batch, device=self.device)
 
 def to_cpu(x):
     if isinstance(x, Mapping): return {k:to_cpu(v) for k,v in x.items()}
@@ -203,7 +205,7 @@ def to_cpu(x):
     if isinstance(x, tuple): return tuple(to_cpu(list(x)))
     res = x.detach().cpu()
     return res.float() if res.dtype==torch.float16 else res
-     
+
 class MetricsCB(callback):
     def __init__(self, *ms, **metrics):
         for o in ms: metrics[type(o).__name__] = o
@@ -226,13 +228,6 @@ class MetricsCB(callback):
         for m in self.metrics.values(): m.update(to_cpu(learn.preds), y)
         self.loss.update(to_cpu(learn.loss), weight=len(x))
 
-# class DeviceCB(callback):
-#     def __init__(self, device=def_device): fc.store_attr()
-#     def before_fit(self, learn):
-#         if hasattr(learn.model, 'to'): learn.model.to(self.device)
-#     def before_batch(self, learn): learn.batch = to_device(learn.batch, device=self.device)
-     
-
 class SingleBatchCB(callback):
     order = 1
     def after_batch(self, learn): raise CancelFitException()
@@ -243,8 +238,7 @@ class TrainCB(callback):
     def get_loss(self, learn): learn.loss = learn.loss_func(learn.preds, *learn.batch[self.n_inp:])
     def backward(self, learn): learn.loss.backward()
     def step(self, learn): learn.opt.step()
-    def zero_grad(self, learn): learn.opt.zero_grad()
-     
+    def zero_grad(self, learn): learn.opt.zero_grad()     
      
 class ProgressCB(callback):
     order = MetricsCB.order+1
@@ -274,6 +268,54 @@ class ProgressCB(callback):
             if self.plot and hasattr(learn, 'metrics'): 
                 self.val_losses.append(learn.metrics.all_metrics['loss'].compute())
                 self.mbar.update_graph([[fc.L.range(self.losses), self.losses],[fc.L.range(learn.epoch+1).map(lambda x: (x+1)*len(learn.dls.train)), self.val_losses]])
-     
-     
 
+class Learner():
+    def __init__(self, model, dls=(0,), loss_func=F.mse_loss, lr=0.1, cbs=None, opt_func=optim.SGD):
+        cbs = fc.L(cbs)
+        fc.store_attr()
+
+    @contextmanager
+    def cb_ctx(self, nm):
+        try:
+            self.callback(f'before_{nm}')
+            yield
+            self.callback(f'after_{nm}')
+        except globals()[f'Cancel{nm.title()}Exception']: pass
+        finally: self.callback(f'cleanup_{nm}')
+                
+    def one_epoch(self, train):
+        self.model.train(train)
+        self.dl = self.dls.train if train else self.dls.valid
+        with self.cb_ctx('epoch'):
+            for self.iter,self.batch in enumerate(self.dl):
+                with self.cb_ctx('batch'):
+                    self.predict()
+                    self.get_loss()
+                    if self.training:
+                        self.backward()
+                        self.step()
+                        self.zero_grad()
+    
+    def fit(self, n_epochs=1, train=True, valid=True, cbs=None, lr=None):
+        cbs = fc.L(cbs)
+        # `add_cb` and `rm_cb` were added in lesson 18
+        for cb in cbs: self.cbs.append(cb)
+        try:
+            self.n_epochs = n_epochs
+            self.epochs = range(n_epochs)
+            self.opt = self.opt_func(self.model.parameters(), self.lr if lr is None else lr)
+            with self.cb_ctx('fit'):
+                for self.epoch in self.epochs:
+                    if train: self.one_epoch(True)
+                    if valid: torch.no_grad()(self.one_epoch)(False)
+        finally:
+            for cb in cbs: self.cbs.remove(cb)
+
+    def __getattr__(self, name):
+        if name in ('predict','get_loss','backward','step','zero_grad'): return partial(self.callback, name)
+        raise AttributeError(name)
+
+    def callback(self, method_nm): run_cbs(self.cbs, method_nm, self)
+    
+    @property
+    def training(self): return self.model.training
