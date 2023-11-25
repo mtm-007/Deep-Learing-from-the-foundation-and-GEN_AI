@@ -4,7 +4,7 @@
 # this file is converted from a notebook to python script
 
 
-import pickle,logging,gzip,math,os,time,shutil,torch,matplotlib as mpl,numpy as np,matplotlib.pyplot as plt
+import pickle,random,logging,gzip,math,os,time,shutil,torch,matplotlib as mpl,numpy as np,matplotlib.pyplot as plt
 from pathlib import Path
 from torch import tensor,nn,optim
 import torch.nn.functional as F 
@@ -19,6 +19,7 @@ from fastprogress import progress_bar,master_bar
 from collections.abc import Mapping
 from functools import partial
 from copy import copy
+from torch.optim.lr_scheduler import ExponentialLR
      
 
 from datasets import load_dataset,load_dataset_builder
@@ -319,3 +320,46 @@ class Learner():
     
     @property
     def training(self): return self.model.training
+
+class TrainLearner(Learner):
+    def predict(self): self.preds = self.model(self.batch[0])
+    def get_loss(self): self.loss = self.loss_func(self.preds, self.batch[1])
+    def backward(self): self.loss.backward()
+    def step(self): self.opt.step()
+    def zero_grad(self): self.opt.zero_grad()
+
+class MomentumLearner(TrainLearner):
+    def __init__(self,model,dls,loss_func,lr,cbs, opt_func=optim.SGD, mom=0.85):
+        self.mom = mom
+        super().__init__(model,dls,loss_func,lr,cbs, opt_func)
+    
+    def zero_grad(self):
+        with torch.no_grad():
+            for p in self.model.parameters(): p.grad *= self.mom
+
+class LRFinderCB(callback):
+    def __init__(self,gamma=1.3): fc.store_attr()
+        
+    def before_fit(self,learn):
+        self.sched = ExponentialLR(learn.opt,self.gamma) 
+        self.lrs,self.losses = [],[]
+        self.min = math.inf
+    
+    def after_batch(self,learn):
+        if not learn.training: raise CancelEpochException()
+        self.lrs.append(learn.opt.param_groups[0]['lr'])
+        loss = to_cpu(learn.loss)
+        self.losses.append(loss)
+        if loss < self.min: self.min = loss
+        if loss > self.min*3: raise CancelFitException()
+        self.sched.step()
+        
+    def cleanup_fit(self,learn):
+        plt.plot(self.lrs,self.losses)
+        plt.xscale('log')
+
+def set_seed(seed, deterministic=False):
+    torch.use_deterministic_algorithms(deterministic)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
