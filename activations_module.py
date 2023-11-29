@@ -2,19 +2,27 @@ from __future__ import annotations
 import random,math,torch,numpy as np,matplotlib.pyplot as plt
 import fastcore.all as fc
 from functools import partial
-
 from n_framework import *
 import torch.nn.functional as F,matplotlib as mpl
 from pathlib import Path
 from operator import attrgetter,itemgetter
 from contextlib import contextmanager
 import sys,gc,traceback
-
 from torch import tensor,nn,optim
 import torchvision.transforms.functional as TF
 from datasets import load_dataset
 
 from fastcore.test import test_close
+
+import pickle,gzip,math,os,time,shutil,torch,matplotlib as mpl,numpy as np,matplotlib.pyplot as plt
+import sys,gc,traceback
+from collections.abc import Mapping
+from copy import copy
+from torch.utils.data import DataLoader,default_collate
+from torch.nn import init
+from torcheval.metrics import MulticlassAccuracy
+from datasets import load_dataset,load_dataset_builder
+
 
 torch.set_printoptions(precision=2, linewidth=140, sci_mode=False)
 mpl.rcParams['figure.constrained_layout.use'] = True
@@ -120,3 +128,76 @@ def clean_tb():
         delattr(sys, 'last_traceback')
     if hasattr(sys, 'last_type'): delattr(sys, 'last_type')
     if hasattr(sys, 'last_value'): delattr(sys, 'last_value')
+
+class BatchTransformCB(callback):
+    def __init__(self,tfm): self.tfm=tfm
+    def before_batch(self,learn): learn.batch = self.tfm(learn.batch)
+
+class GeneralReLU(nn.Module):
+    def __init__(self,leak=None, sub=None, maxv=None):
+        super().__init__()
+        self.leak,self.sub,self.maxv = leak,sub,maxv
+        
+    def forward(self,x):
+        x = F.leaky_relu(x,self.leak) if self.leak is not None else F.relu(x)
+        if self.sub is not None: x -= self.sub
+        if self.maxv is not None: x.clamp_max(self.maxv)
+        return x
+    
+def plot_func(f, start=-5., end=5.,steps=100):
+    x=torch.linspace(start,end,steps)
+    plt.plot(x,f(x))
+    plt.grid(True, which='both',ls = '--')
+    plt.axhline(y=0,color='k',linewidth=0.7)
+    plt.axvline(x=0,color='k', linewidth=0.7)
+
+def init_weights(m,leaky=0.):
+    if isinstance(m,(nn.Conv1d,nn.Conv2d,nn.Conv3d,nn.Linear)): init.kaiming_normal_(m.weight,a=leaky)
+
+def _lsuv_stats(hook,mod,inp,outp):
+    acts = to_cpu(outp)
+    hook.mean = acts.mean()
+    hook.std = acts.std()
+    
+def lsuv_init(m,m_in,xb):
+    h = Hook(m,_lsuv_stats)
+    with torch.no_grad():
+        while model(xb) is not None and (abs(h.std -1)>1e-3 or abs(h.mean)>1e-3):
+            #print('before: ',h.mean,h.std)
+            m_in.bias -=h.mean
+            m_in.weight.data/=h.std
+        #print('after:',h.mean,h.std)
+    h.remove()
+
+class LayerNorm(nn.Module):
+    def __init__(self,dummy, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.mult = nn.Parameter(tensor(1.))
+        self.add  = nn.Parameter(tensor(0.))
+    def forward(self,x):
+        m = x.mean((1,2,3),keepdim=True)
+        v = x.var ((1,2,3), keepdim=True)
+        x = (x-m)/((v+self.eps).sqrt())
+        return x*self.mult + self.add
+    
+# def conv(ni,nf,ks=3,stride=2,act=nn.ReLU, norm = None, bias=True):
+#     layers = [nn.Conv2d(ni,nf,stride=stride, kernel_size=ks,padding=ks//2, bias=bias)]
+#     if norm: layers.append(norm(nf))
+#     if act: layers.append(act())
+#     return nn.Sequential(*layers)
+def conv(ni,nf,ks=3,stride=2,act=nn.ReLU, norm = None, bias=None):
+    layers = [nn.Conv2d(ni,nf,stride=stride, kernel_size=ks,padding=ks//2, bias=bias)]
+    if norm: layers.append(norm(nf))
+    if act: layers.append(act())
+    return nn.Sequential(*layers)
+
+
+# def get_model(act=nn.ReLU,nfs=None,norm=None):
+#     if nfs is None: nfs = [1,8,16,32,64]
+#     layers =[conv(nfs[i],nfs[i+1],act=act,norm=norm) for i in range(len(nfs)-1)]   
+#     return nn.Sequential(*layers,conv(nfs[-1],10, act=None,norm=None,bias=False),nn.Flatten()).to(def_device)
+def get_model(act=nn.ReLU,nfs=None,norm=None):
+    if nfs is None: nfs = [1,8,16,32,64]
+    layers =[conv(nfs[i],nfs[i+1],act=act,norm=norm) for i in range(len(nfs)-1)]   
+    return nn.Sequential(*layers,conv(nfs[-1],10, act=None,norm=False,bias=True),nn.Flatten()).to(def_device)
