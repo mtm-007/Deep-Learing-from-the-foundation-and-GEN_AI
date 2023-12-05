@@ -201,3 +201,35 @@ def get_model(act=nn.ReLU,nfs=None,norm=None):
     if nfs is None: nfs = [1,8,16,32,64]
     layers =[conv(nfs[i],nfs[i+1],act=act,norm=norm) for i in range(len(nfs)-1)]   
     return nn.Sequential(*layers,conv(nfs[-1],10, act=None,norm=False,bias=True),nn.Flatten()).to(def_device)
+
+class BaseschedulerCB(callback):
+    def __init__(self,sched): self.sched = sched
+    def before_fit(self,learn): self.schedo = self.sched(learn.opt)
+    def step(self,learn):
+        if learn.training: self.schedo.step()
+
+class BatchschedCB(BaseschedulerCB):
+    def after_batch(self,learn): self.step(learn)
+
+class HasLearnCB(callback):
+    def before_fit(self,learn): self.learn = learn
+    def after_fit(self,learn): self.learn = None
+
+class RecorderCB(callback):
+    def __init__(self, **d): self.d = d
+    def before_fit(self,learn):
+            self.recs = {k:[] for k in self.d}
+            self.pg = learn.opt.param_groups[0]
+            
+    def after_batch(self,learn):
+        if not learn.training: return
+        for k,v in self.d.items():
+            self.recs[k].append(v(self))
+    def plot(self):
+        for k,v in self.recs.items():
+            plt.plot(v,label=k)
+            plt.legend()
+            plt.show()
+
+class EpochSchedCB(BaseschedulerCB):
+    def after_epoch(self,learn): self.step(learn)
