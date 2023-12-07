@@ -363,3 +363,7 @@ def set_seed(seed, deterministic=False):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+@fc.patch
+def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epoch=10):
+    self.fit(max_epoch, lr=start_lr,cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))

@@ -10,10 +10,7 @@ from contextlib import contextmanager
 import sys,gc,traceback
 from torch import tensor,nn,optim
 import torchvision.transforms.functional as TF
-from datasets import load_dataset
-
 from fastcore.test import test_close
-
 import pickle,gzip,math,os,time,shutil,torch,matplotlib as mpl,numpy as np,matplotlib.pyplot as plt
 import sys,gc,traceback
 from collections.abc import Mapping
@@ -22,6 +19,7 @@ from torch.utils.data import DataLoader,default_collate
 from torch.nn import init
 from torcheval.metrics import MulticlassAccuracy
 from datasets import load_dataset,load_dataset_builder
+from torch.optim import lr_scheduler
 
 
 torch.set_printoptions(precision=2, linewidth=140, sci_mode=False)
@@ -233,3 +231,22 @@ class RecorderCB(callback):
 
 class EpochSchedCB(BaseschedulerCB):
     def after_epoch(self,learn): self.step(learn)
+@fc.patch
+def lr_find(self:Learner, gamma=1.3, max_mult=3, start_lr=1e-5, max_epoch=10):
+    self.fit(max_epoch, lr=start_lr,cbs=LRFinderCB(gamma=gamma, max_mult=max_mult))
+
+act_gr = partial(GeneralReLU, leak=0.1, sub=0.4)
+
+def _conv_block(ni, nf, stride, act= act_gr, norm=None, ks=3):
+    return nn.Sequential(conv(ni, nf, stride=1, act=act, norm=norm, ks=ks),
+                        conv(nf, nf, stride=stride, act=None, norm=norm, ks=ks))
+
+class ResBlock(nn.Module):
+    def __init__(self, ni, nf, stride=1, ks=3, act=act_gr, norm=None):
+        super().__init__()
+        self.convs  = _conv_block(ni, nf, stride, act=act, ks=ks, norm=norm)
+        self.idconv = fc.noop if ni==nf else conv(ni, nf, ks=1, stride=1, act=None)
+        self.pool   = fc.noop if stride==1 else nn.AvgPool2d(2, ceil_mode=True)
+        self.act    = act() 
+        
+    def forward(self, x): return self.act(self.convs(x) + self.idconv(self.pool(x)))
