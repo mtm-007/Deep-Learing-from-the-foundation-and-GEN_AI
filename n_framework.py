@@ -129,9 +129,12 @@ def get_grid(
 
 @fc.delegates(subplots)
 def show_images(ims:list, # Images to show
-                nrows:int|None=None, # Number of rows in grid
-                ncols:int|None=None, # Number of columns in grid (auto-calculated if None)
-                titles:list|None=None, # Optional list of titles for each image
+                # nrows:int|None=None, # Number of rows in grid
+                # ncols:int|None=None, # Number of columns in grid (auto-calculated if None)
+                # titles:list|None=None, # Optional list of titles for each image
+                nrows:int=None, # Number of rows in grid
+                ncols:int=None, # Number of columns in grid (auto-calculated if None)
+                titles:list=None, # Optional list of titles for each image
                 **kwargs):
     "Show all images `ims` as subplots with `rows` using `titles`"
     axs = get_grid(len(ims), nrows, ncols, **kwargs)[1].flat
