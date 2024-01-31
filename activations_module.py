@@ -128,8 +128,12 @@ def clean_tb():
     if hasattr(sys, 'last_value'): delattr(sys, 'last_value')
 
 class BatchTransformCB(callback):
-    def __init__(self,tfm): self.tfm=tfm
-    def before_batch(self,learn): learn.batch = self.tfm(learn.batch)
+    def __init__(self, tfm, on_train=True, on_val=True): fc.store_attr()
+
+    def before_batch(self, learn):
+        if (self.on_train and learn.training) or (self.on_val and not learn.training):
+            learn.batch = self.tfm(learn.batch)     
+
 
 class GeneralReLU(nn.Module):
     def __init__(self,leak=None, sub=None, maxv=None):
@@ -250,6 +254,21 @@ class ResBlock(nn.Module):
         self.act    = act() 
         
     def forward(self, x): return self.act(self.convs(x) + self.idconv(self.pool(x)))
+
+def summary(self:Learner):
+    res = '|Module|Input|Output|Num params|\n|--|--|--|--|\n'
+    tot = 0
+    def _f(hook, mod, inp, outp):
+        nonlocal res,tot
+        nparms = sum(o.numel() for o in mod.parameters())
+        tot += nparms
+        res += f'|{type(mod).__name__}|{tuple(inp[0].shape)}|{tuple(outp.shape)}|{nparms}|\n'
+    with Hooks(self.model, _f) as hooks: self.fit(1, lr=1, train=False, cbs=SingleBatchCB())
+    print("Tot params: ", tot)
+    if fc.IN_NOTEBOOK:
+        from IPython.display import Markdown
+        return Markdown(res)
+    else: print(res)
 
 def _rand_erase1(x, pct, xm, xs, mn, mx):
     szx = int(pct*x.shape[-2])
